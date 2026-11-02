@@ -82,6 +82,7 @@ import {
         accounts: [],
         models: [],
         points: [],
+        prediction: null,
         page: 1,
         pageSize: 20,
         needsRender: false,

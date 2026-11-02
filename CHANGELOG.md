@@ -10,10 +10,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- **Burn-rate exhaustion forecast**: on the quota-history tab, the extension regresses the current quota cycle (monotonic decrease since the last reset) via ordinary least squares over the collected 30-day history and estimates hourly burn rate and projected exhaustion time:
+  - the summary footer shows `Burn rate: X%/h`, followed by either a warning (`projected to run out in Yh Zm`, ⚠️ when exhaustion precedes reset) or `lasts until reset (~N%)`;
+  - the chart renders a dashed projection line (error-colored when exhaustion precedes reset);
+  - forecasts require ≥3 samples spanning ≥30 minutes with R² ≥ 0.4; noisy low-confidence data yields no exhaustion timestamp;
+  - new pure module `src/services/burn_rate.ts` with 10 unit tests (cycle slicing, dirty-data filtering, slope/R², countdown fallback).
+
 ### Fixed
 - **New models (e.g. Gemini 4) could not be monitored**: in authorized mode the official `models` map is now the single source of truth — models missing from a stale `agentModelSorts` list are appended automatically instead of being dropped.
 - **New models missing from card list**: newly released models are auto-added to the user's customized visible-model list (blacklisted models excluded); first run only establishes a baseline without changing the current view.
-- **New models hidden in grouped mode**: ungrouped models now join an existing family group (Claude / Gemini Pro / Flash / Image) at runtime, or render as a solo group when no family matches, instead of being silently hidden.
+- **New models hidden in grouped mode**: ungrouped models are no longer silently hidden — newly discovered models are auto-added to the user's visible list and can be assigned to groups by the user in the grouping editor.
+- **Could not add or remove models within a group**: group editing works again — snapshot groups no longer contain entries outside `groupMappings`; the quota-signature check only affects display and never deletes the user's group mappings; the "add model" dropdown compares quotas with a 0.5pp tolerance and always offers an add action; creating two groups in the same millisecond no longer collides. New `shared/grouping_logic.ts` holds the pure group-editing logic with 18 unit tests (including a create → add models → save → reopen round trip).
 - **Internal noise stays hidden**: the fallback no longer surfaces `isInternal` experiment models (`chat_20706`/`chat_23310`), tab-completion preview models (`M19`/`M28`), the tiered routing alias (`M322`) or legacy `gemini-2.5-*` aliases whose quota duplicates newer entries (shared predicate on both the sorts and fallback paths).
 - Fixed 24 pre-existing `tsc --noEmit` errors masked by esbuild's transpile-only pipeline (missing `OAuthCredential.isGcpTos` / `QuotaSnapshot.activeModelId` fields, undefined symbol references) and removed an unreachable duplicate "reauthorize account" dead block (the live handler is the `autoTrigger.reauthorizeAccount` case).
 
