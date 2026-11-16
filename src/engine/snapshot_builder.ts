@@ -5,7 +5,7 @@
  */
 
 import { ModelQuotaInfo, QuotaGroup } from '../shared/types';
-import { ModelFamily, buildFamilyGroupMap, resolveModelFamily } from './model_family';
+
 
 export interface SnapshotGroupingConfig {
     groupingEnabled: boolean;
@@ -19,7 +19,11 @@ export interface SnapshotGroupingConfig {
 export interface SnapshotAssemblySideEffects {
     /** visibleModels 过滤后为空（配置与服务端模型不匹配），调用方应重置可见列表 */
     resetVisibleModels: boolean;
-    /** 组内配额签名与多数派不一致而被移出分组的 modelId */
+    /**
+     * 组内配额签名与多数派不一致、不在分组视图中展示的 modelId。
+     * 仅用于展示层过滤，调用方不得据此删除 config.groupMappings 中的条目——
+     * 用户的分组配置只能由用户自己修改。
+     */
     removedMappingIds: string[];
 }
 
@@ -113,7 +117,10 @@ export function assembleSnapshotModels(
                 }
             }
 
-            // 3) 多数派配额签名校验：不一致的模型移出分组
+            // 3) 多数派配额签名校验：不一致的模型不在分组视图中展示
+            //    注意：这里只影响"展示"，绝不删除 config.groupMappings 中的条目。
+            //    早期实现会同时删除映射，导致用户刚保存的分组被系统自动清空，
+            //    表现为「无法调整分组里的模型」；用户配置必须由用户自己修改。
             for (const [, groupModels] of groupMap) {
                 if (groupModels.length <= 1) {
                     continue;
@@ -145,34 +152,12 @@ export function assembleSnapshotModels(
             }
         }
 
-        // 4) 兜底：未映射模型并入同族已有组，否则独立成组（保证新模型在分组视图可见）
-        const assignedModelIds = new Set<string>();
-        for (const groupModels of groupMap.values()) {
-            groupModels.forEach(m => assignedModelIds.add(m.modelId));
-        }
-        const runtimeMappings: Record<string, string> = {};
-        for (const [gid, gModels] of groupMap.entries()) {
-            for (const m of gModels) {
-                runtimeMappings[m.modelId] = gid;
-            }
-        }
-        const resolveFamily = (modelId: string, label?: string): ModelFamily | null =>
-            resolveModelFamily(modelId, label);
-        const runtimeFamilyGroupMap = buildFamilyGroupMap(runtimeMappings, id => resolveFamily(id));
-
-        for (const model of models) {
-            if (assignedModelIds.has(model.modelId)) {
-                continue;
-            }
-            const family = resolveFamily(model.modelId, model.label);
-            const familyGroupId = family ? runtimeFamilyGroupMap[family] : undefined;
-            if (familyGroupId) {
-                groupMap.get(familyGroupId)?.push(model);
-            } else {
-                groupMap.set(`auto-solo:${model.modelId}`, [model]);
-            }
-            assignedModelIds.add(model.modelId);
-        }
+        // 4) 分组视图只展示 groupMappings 中已有的模型（与上游一致）。
+        //    未映射模型不进入任何组：webview 的分组编辑弹框以 config.groupMappings
+        //    为准重建分组，若快照里出现映射外的组或成员，用户打开弹框时该组/成员
+        //    就会消失，表现为「无法调整分组里的模型」。
+        //    新模型的可见性由「自动纳入 visibleModels」保证（见 reactor 的
+        //    adoptNewlyDiscoveredModels），其分组归属交给用户在弹框中分配。
 
         // 5) 转 QuotaGroup
         groups = [];

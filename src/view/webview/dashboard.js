@@ -6,6 +6,16 @@
 import { AUTH_MODEL_BLACKLIST_IDS, AUTH_RECOMMENDED_LABELS, AUTH_RECOMMENDED_MODEL_IDS } from '../../shared/recommended_models';
 import { createHistoryModule } from './dashboard_history';
 import { createAnnouncementModule } from './dashboard_announcements';
+import {
+    addModelToGroup,
+    buildGroupMappingsFromGroups,
+    buildGroupsFromMappings,
+    createCustomGroup,
+    findUngroupedModels,
+    isModelCompatibleWithGroup,
+    removeModelFromGroup,
+    resolveGroupSignature,
+} from '../../shared/grouping_logic';
 
 (function () {
     'use strict';
@@ -2787,33 +2797,12 @@ import { createAnnouncementModule } from './dashboard_announcements';
         customGroupingState.groupMappings = { ...(currentConfig.groupMappings || {}) };
         customGroupingState.smartGroupCanonicalNames = null;
 
-        // 从现有映射构建分组
-        const groupMap = new Map(); // groupId -> { id, name, modelIds }
+        // 从现有映射构建分组（逻辑抽到 shared/grouping_logic，便于单测）
         const groupNames = currentConfig.groupCustomNames || {};
-
-        for (const model of models) {
-            const groupId = customGroupingState.groupMappings[model.modelId];
-            if (groupId) {
-                if (!groupMap.has(groupId)) {
-                    // 尝试从 groupNames 获取名称，否则使用默认名称
-                    let groupName = '';
-                    for (const modelId of Object.keys(groupNames)) {
-                        if (customGroupingState.groupMappings[modelId] === groupId) {
-                            groupName = groupNames[modelId];
-                            break;
-                        }
-                    }
-                    groupMap.set(groupId, {
-                        id: groupId,
-                        name: groupName || `Group ${groupMap.size + 1}`,
-                        modelIds: []
-                    });
-                }
-                groupMap.get(groupId).modelIds.push(model.modelId);
-            }
-        }
-
-        customGroupingState.groups = sortGroupsForDisplay(Array.from(groupMap.values()), models);
+        customGroupingState.groups = sortGroupsForDisplay(
+            buildGroupsFromMappings(customGroupingState.groupMappings, models, groupNames),
+            models,
+        );
 
         // 渲染弹框内容
         renderCustomGroupingContent();
@@ -2911,12 +2900,7 @@ import { createAnnouncementModule } from './dashboard_announcements';
 
     function handleAddGroup() {
         customGroupingState.smartGroupCanonicalNames = null;
-        const newGroupId = 'custom_group_' + Date.now();
-        customGroupingState.groups.push({
-            id: newGroupId,
-            name: `Group ${customGroupingState.groups.length + 1}`,
-            modelIds: []
-        });
+        customGroupingState.groups.push(createCustomGroup(customGroupingState.groups));
         renderCustomGroupingContent();
     }
 
@@ -2938,7 +2922,7 @@ import { createAnnouncementModule } from './dashboard_announcements';
         if (!isNaN(groupIndex) && modelId) {
             const group = customGroupingState.groups[groupIndex];
             if (group) {
-                group.modelIds = group.modelIds.filter(id => id !== modelId);
+                customGroupingState.groups[groupIndex] = removeModelFromGroup(group, modelId);
                 renderCustomGroupingContent();
             }
         }
@@ -2960,12 +2944,8 @@ import { createAnnouncementModule } from './dashboard_announcements';
         const group = customGroupingState.groups[groupIndex];
         if (!group) return;
 
-        // 获取已分组的模型
-        const groupedModelIds = new Set();
-        customGroupingState.groups.forEach(g => g.modelIds.forEach(id => groupedModelIds.add(id)));
-
         // 获取可用模型（未分组的）
-        const availableModels = customGroupingState.allModels.filter(m => !groupedModelIds.has(m.modelId));
+        const availableModels = findUngroupedModels(customGroupingState.groups, customGroupingState.allModels);
 
         if (availableModels.length === 0) {
             showToast(i18n['customGrouping.noModels'] || 'No available models', 'info');
@@ -2973,21 +2953,11 @@ import { createAnnouncementModule } from './dashboard_announcements';
         }
 
         // 获取组的配额签名（如果组已有模型）
-        let groupSignature = null;
-        if (group.modelIds.length > 0) {
-            const firstModelId = group.modelIds[0];
-            const firstModel = customGroupingState.allModels.find(m => m.modelId === firstModelId);
-            if (firstModel) {
-                groupSignature = {
-                    remainingPercentage: firstModel.remainingPercentage,
-                    resetTimeDisplay: firstModel.resetTimeDisplay
-                };
-            }
-        }
+        const groupSignature = resolveGroupSignature(group, customGroupingState.allModels);
 
         // 创建下拉选择菜单
         showModelSelectDropdown(e.target, availableModels, groupSignature, (selectedModelId) => {
-            group.modelIds.push(selectedModelId);
+            customGroupingState.groups[groupIndex] = addModelToGroup(group, selectedModelId);
             renderCustomGroupingContent();
         });
     }
@@ -3008,21 +2978,17 @@ import { createAnnouncementModule } from './dashboard_announcements';
         dropdown.style.left = rect.left + 'px';
         dropdown.style.top = (rect.bottom + 4) + 'px';
 
-        // 计算每个模型的兼容性
+        // 计算每个模型的兼容性（共享逻辑，见 shared/grouping_logic）
+        // 说明：兼容性只用于排序提示与标注，不阻止用户添加。
+        // 早期实现用浮点精确比较 + 本地化时间字符串比较，且当组内无兼容模型时
+        // 直接不渲染"添加"按钮，导致用户无法向分组添加模型（表现为无法调整分组）。
         const modelsWithCompatibility = models.map(model => {
-            let isCompatible = true;
-            let incompatibleReason = '';
-
-            if (groupSignature) {
-                if (model.remainingPercentage !== groupSignature.remainingPercentage) {
-                    isCompatible = false;
-                    incompatibleReason = i18n['customGrouping.quotaMismatch'] || 'Quota mismatch';
-                } else if (model.resetTimeDisplay !== groupSignature.resetTimeDisplay) {
-                    isCompatible = false;
-                    incompatibleReason = i18n['customGrouping.resetMismatch'] || 'Reset time mismatch';
-                }
-            }
-
+            const { isCompatible, reason } = isModelCompatibleWithGroup(model, groupSignature);
+            const incompatibleReason = reason === 'quotaMismatch'
+                ? (i18n['customGrouping.quotaMismatch'] || 'Quota mismatch')
+                : reason === 'resetMismatch'
+                    ? (i18n['customGrouping.resetMismatch'] || 'Reset time mismatch')
+                    : '';
             return { model, isCompatible, incompatibleReason };
         });
 
@@ -3033,9 +2999,6 @@ import { createAnnouncementModule } from './dashboard_announcements';
             return 0;
         });
 
-        // 检查是否有兼容的模型
-        const hasCompatibleModels = modelsWithCompatibility.some(m => m.isCompatible);
-
         dropdown.innerHTML = `
             <div class="model-select-list">
                 ${modelsWithCompatibility.map(({ model, isCompatible, incompatibleReason }) => {
@@ -3043,12 +3006,11 @@ import { createAnnouncementModule } from './dashboard_announcements';
             const quotaPct = (model.remainingPercentage || 0).toFixed(1);
 
             return `
-                        <label class="model-select-item ${isCompatible ? '' : 'disabled'}" 
-                             data-model-id="${escapeHtml(model.modelId)}" 
+                        <label class="model-select-item ${isCompatible ? '' : 'incompatible'}"
+                             data-model-id="${escapeHtml(model.modelId)}"
                              data-compatible="${isCompatible}">
-                            <input type="checkbox" class="model-checkbox" 
-                                   value="${escapeHtml(model.modelId)}" 
-                                   ${isCompatible ? '' : 'disabled'}>
+                            <input type="checkbox" class="model-checkbox"
+                                   value="${escapeHtml(model.modelId)}">
                             <span class="model-name">${escapeHtml(name)}</span>
                             <span class="model-quota">${quotaPct}%</span>
                             ${!isCompatible ? `<span class="incompatible-reason">${escapeHtml(incompatibleReason)}</span>` : ''}
@@ -3056,13 +3018,11 @@ import { createAnnouncementModule } from './dashboard_announcements';
                     `;
         }).join('')}
             </div>
-            ${hasCompatibleModels ? `
-                <div class="model-select-footer">
-                    <button class="btn-confirm-add" disabled>
-                        ${escapeHtml(i18n['customGrouping.addModel'] || 'Add')} (<span class="selected-count">0</span>)
-                    </button>
-                </div>
-            ` : ''}
+            <div class="model-select-footer">
+                <button class="btn-confirm-add" disabled>
+                    ${escapeHtml(i18n['customGrouping.addModel'] || 'Add')} (<span class="selected-count">0</span>)
+                </button>
+            </div>
         `;
 
         document.body.appendChild(dropdown);
@@ -3260,29 +3220,19 @@ import { createAnnouncementModule } from './dashboard_announcements';
     }
 
     function saveCustomGrouping() {
-        // 检查是否有空分组
-        const emptyGroups = customGroupingState.groups.filter(g => g.modelIds.length === 0);
-        if (emptyGroups.length > 0) {
-            // 移除空分组
-            customGroupingState.groups = customGroupingState.groups.filter(g => g.modelIds.length > 0);
-        }
+        // 空分组不保存（共享逻辑，见 shared/grouping_logic）
+        const nonEmptyGroups = customGroupingState.groups.filter(g => g.modelIds.length > 0);
+        customGroupingState.groups = nonEmptyGroups;
 
-        // 构建新的 groupMappings
-        const newMappings = {};
-        const newGroupNames = {};
+        // 构建新的 groupMappings（groupId 由成员排序拼接，避免原地排序改写用户数据）
         const smartGroupCanonicalNames = customGroupingState.smartGroupCanonicalNames;
+        const { groupMappings: newMappings, groupNames: newGroupNames } =
+            buildGroupMappingsFromGroups(nonEmptyGroups);
 
-        for (const group of customGroupingState.groups) {
-            // 生成稳定的 groupId
-            const stableGroupId = group.modelIds.sort().join('_');
-            for (const modelId of group.modelIds) {
-                newMappings[modelId] = stableGroupId;
-                // 自动分组后保存时强制覆盖组名，并通过“仅写当前分组模型”清理旧残留名称映射
-                if (smartGroupCanonicalNames && smartGroupCanonicalNames[modelId]) {
+        if (smartGroupCanonicalNames) {
+            for (const modelId of Object.keys(newGroupNames)) {
+                if (smartGroupCanonicalNames[modelId]) {
                     newGroupNames[modelId] = smartGroupCanonicalNames[modelId];
-                } else {
-                    // 使用锚点共识机制保存分组名称
-                    newGroupNames[modelId] = group.name;
                 }
             }
         }

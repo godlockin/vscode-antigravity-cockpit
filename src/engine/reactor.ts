@@ -1279,15 +1279,13 @@ export class ReactorCore {
         }
 
         if (assembly.removedMappingIds.length > 0) {
-            const newMappings = { ...config.groupMappings };
-            for (const modelId of assembly.removedMappingIds) {
-                delete newMappings[modelId];
-                logger.info(`[GroupCheck] Removing model "${modelId}" from its group due to quota mismatch`);
-            }
-            configService.updateGroupMappings(newMappings).catch((err: unknown) => {
-                logger.warn(`Failed to save updated groupMappings: ${String(err)}`);
-            });
-            logger.info(`[GroupCheck] Removed ${assembly.removedMappingIds.length} models from groups due to quota mismatch`);
+            // 仅提示：这些模型因组内配额不一致而不在分组视图展示。
+            // 不删除 groupMappings 条目——用户的分组配置只能由用户自己修改，
+            // 否则刚保存的分组会被自动清空（表现为无法调整分组里的模型）。
+            logger.info(
+                `[GroupCheck] ${assembly.removedMappingIds.length} model(s) hidden from grouped view due to quota mismatch: `
+                + `${assembly.removedMappingIds.join(', ')}`,
+            );
         }
 
         if (config.groupingEnabled) {
@@ -1345,6 +1343,11 @@ export class ReactorCore {
         }
 
         logger.info(`[ModelAdoption] Detected ${result.newIds.length} new model(s) from API: ${result.newIds.join(', ')}`);
+
+        // 新模型自动归入同族已有分组（写入 groupMappings，保持数据一致；
+        // 分组视图与分组编辑弹框都以此为准，不做运行时临时分组）
+        this.adoptNewModelsIntoFamilyGroups(allModels, result.newIds);
+
         if (!result.mergedVisibleIds) {
             return null;
         }
@@ -1352,6 +1355,51 @@ export class ReactorCore {
         void configService.updateVisibleModels(result.mergedVisibleIds);
         logger.info(`[ModelAdoption] Auto-visible new model(s): ${result.newIds.join(', ')}`);
         return result.mergedVisibleIds;
+    }
+
+    /**
+     * 把新模型写入同族已有分组的映射（与 autoAssignNewModelsToExistingGroups 同一语义，
+     * 但基于 knownModelIds 基线识别新模型，因此首次见到的新模型也会被归组）。
+     */
+    private adoptNewModelsIntoFamilyGroups(
+        allModels: ModelQuotaInfo[],
+        newModelIds: string[],
+    ): void {
+        const config = configService.getConfig();
+        const existingMappings = config.groupMappings || {};
+        if (Object.keys(existingMappings).length === 0) {
+            return;
+        }
+        const familyGroupMap = this.buildAutoFamilyGroupMap(existingMappings);
+        if (Object.keys(familyGroupMap).length === 0) {
+            return;
+        }
+
+        const newIdSet = new Set(newModelIds);
+        let changedCount = 0;
+        const nextMappings = { ...existingMappings };
+        for (const model of allModels) {
+            if (!newIdSet.has(model.modelId) || nextMappings[model.modelId]) {
+                continue;
+            }
+            const family = this.resolveAutoGroupFamily(model.modelId, model.label);
+            const targetGroupId = family ? familyGroupMap[family] : undefined;
+            if (!targetGroupId) {
+                continue;
+            }
+            nextMappings[model.modelId] = targetGroupId;
+            changedCount++;
+            logger.info(
+                `[ModelAdoption] Assigned new model "${model.label}" (${model.modelId}) to group "${targetGroupId}" (family=${family})`,
+            );
+        }
+
+        if (changedCount === 0) {
+            return;
+        }
+        void configService.updateGroupMappings(nextMappings).catch((err: unknown) => {
+            logger.warn(`[ModelAdoption] Failed to save group mappings: ${String(err)}`);
+        });
     }
 
 

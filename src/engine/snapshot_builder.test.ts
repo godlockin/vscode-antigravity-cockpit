@@ -91,7 +91,7 @@ describe('assembleSnapshotModels — grouping', () => {
         expect(result.groups?.[0].models.map(m => m.modelId)).toEqual(['A', 'B']);
     });
 
-    it('未映射的新模型按族并入已有组', () => {
+    it('未映射模型不进入任何组（与上游一致，保证弹框可编辑）', () => {
         const models = [
             makeModel({ modelId: 'gemini-3.1-pro-high' }),
             makeModel({ modelId: 'gemini-4-pro-high' }),
@@ -102,19 +102,19 @@ describe('assembleSnapshotModels — grouping', () => {
             groupMappings: { 'gemini-3.1-pro-high': 'g-pro' },
         });
         const proGroup = result.groups?.find(g => g.groupId === 'g-pro');
-        expect(proGroup?.models.map(m => m.modelId)).toContain('gemini-4-pro-high');
+        expect(proGroup?.models.map(m => m.modelId)).toEqual(['gemini-3.1-pro-high']);
+        // 快照中不得出现 groupMappings 之外的组，否则分组编辑弹框会丢失该组
+        expect(result.groups?.every(g => g.groupId === 'g-pro')).toBe(true);
     });
 
-    it('无法归族且未映射的模型独立成组（保证可见）', () => {
+    it('无映射时不生成任何组（上游语义：未分组模型不展示）', () => {
         const models = [makeModel({ modelId: 'FUTURE_UNKNOWN', label: 'Future X' })];
         const result = assembleSnapshotModels(models, {
             ...defaultConfig,
             groupingEnabled: true,
             groupMappings: {},
         });
-        expect(result.groups).toHaveLength(1);
-        expect(result.groups?.[0].groupId).toBe('auto-solo:FUTURE_UNKNOWN');
-        expect(result.groups?.[0].groupName).toBe('Future X');
+        expect(result.groups).toEqual([]);
     });
 
     it('自定义组名多数票生效', () => {
